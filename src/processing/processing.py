@@ -6,6 +6,10 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 class VideoProcessor:
+    '''
+    Класс предназначен для обработки 1 видео на предмет нарушений ПДД.
+    Класс работает с изображением в цветовом пространстве RGB.
+    '''
     def __init__(self, sign_model_path, traffic_light_model_url, sign_classes_yaml):
         """
         Инициализация класса для обработки видео с использованием моделей для распознавания знаков и светофоров.
@@ -17,7 +21,8 @@ class VideoProcessor:
         """
         self.sign_model = YOLO(sign_model_path)
         self.traffic_light_model = YOLO(traffic_light_model_url)
-        
+        self.traffic_signs = {"2.5": "Движение без остановки запрещено", "1.12": "Разметка стоп-линия", "5.15.1": "Полоса для маршрутных транспортных средств", "5.15.2": "Полоса для маршрутных транспортных средств", "3.1": "Въезд запрещен (кирпич)", "1.4.1": "Обозначение полос движения", "4.1.1": "Движение прямо", "2.1": "Главная дорога", "3.27": "Остановка запрещена", "3.28": "Стоянка запрещена", "3.18.1": "Поворот налево запрещен", "3.18.2": "Разворот запрещен", "4.1.3": "Движение налево", "3.20": "Обгон запрещен", "1.1": "Сплошная линия разметки"}
+
         # Загружаем классы знаков из YAML
         with open(sign_classes_yaml, 'r') as f:
             yaml_dict = yaml.safe_load(f)
@@ -53,6 +58,7 @@ class VideoProcessor:
             """
             Функция для обработки кадра и распознавания дорожных знаков.
             
+            :param confidence: уверенность модели в правильной идентификации объекта.
             :param frame: Входной кадр для обработки.
             :return: Список с типами знаков и их координатами.
             """
@@ -135,6 +141,7 @@ class VideoProcessor:
         Функция для обработки кадра и распознавания светофоров и стоп-знаков.
         
         :param frame: Входной кадр для обработки.
+        :param confidence: уверенность модели в правильной идентификации объекта.
         :return: Список с координатами для светофоров и стоп-знаков.
         """
         results = self.traffic_light_model(frame)
@@ -154,10 +161,8 @@ class VideoProcessor:
                 if class_name.lower() == 'traffic light':  # Если это светофор
                     bboxes_traffic_lights.append((x, y, w, h))
                     traffic_lights_colors.append(self.crop_and_identify_color(frame, box))
-                elif class_name.lower() == 'stop sign':  # Если это стоп-знак
-                    bboxes_stop_signs.append((x, y, w, h))
         
-        return bboxes_traffic_lights, traffic_lights_colors, bboxes_stop_signs
+        return bboxes_traffic_lights, traffic_lights_colors
 
     
     def process_frame(self, frame):
@@ -168,15 +173,15 @@ class VideoProcessor:
         :return: Словарь с результатами по каждому типу объектов.
         """
         # Получаем координаты светофоров и стоп-знаков
-        bboxes_traffic_lights, bboxes_stop_signs = self.process_traffic_lights_and_stop_signs(frame)
+        bboxes_traffic_lights, color = self.process_traffic_lights_and_stop_signs(frame)
         
         # Получаем координаты дорожных знаков
         sign_bboxes = self.process_traffic_signs(frame)
         
         return {
             'traffic_lights': bboxes_traffic_lights,
-            'stop_signs': bboxes_stop_signs,
-            'traffic_signs': sign_bboxes
+            'traffic_signs': sign_bboxes,
+            'color': color
         }
 
     def draw_annotations(self, frame, results:dict):
@@ -225,7 +230,7 @@ class VideoProcessor:
         with tqdm(total=(total_frames // frame_step), desc="Processing Video") as pbar:
             while cap.isOpened():
                 ret, frame = cap.read()
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) # преобразовываем сразу в правильное цветое пространство, это важно
                 if not ret:
                     break
 
