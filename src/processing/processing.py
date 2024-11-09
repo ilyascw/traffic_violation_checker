@@ -1,76 +1,161 @@
 import cv2
-import torch
-import json
+import yaml
+from ultralytics import YOLO
+import numpy as np
+from tqdm import tqdm
 
-# Функция для сохранения отчета в JSON файл
-def save_report(report, filename):
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=4, ensure_ascii=False)  # Сохраняем с отступами для читаемости
-        print(f"Отчет успешно сохранен в {filename}")
-    except Exception as e:
-        print(f"Ошибка при сохранении отчета: {str(e)}")
 
-def process_video(input_video, output_path, report):
-    model = torch.hub.load('ultralytics/yolov5', 'yolov5s')  # Загрузка модели YOLOv5 Small (yolov5s)
+class VideoProcessor:
+    def __init__(self, sign_model_path, traffic_light_model_url, sign_classes_yaml, lane_detection_algo_path):
+        """
+        Инициализация класса для обработки видео с использованием моделей для распознавания знаков и светофоров.
+        
+        :param sign_model_path: Путь к файлу модели для распознавания знаков (YOLO).
+        :param traffic_light_model_url: Ссылка на модель для распознавания светофоров.
+        :param sign_classes_yaml: Путь к файлу в формате YAML, который содержит классы знаков.
+        :param lane_detection_algo_path: Путь к алгоритму для распознавания разметки (пока не реализовано).
+        """
+        self.sign_model = YOLO(sign_model_path)
+        self.traffic_light_model = YOLO(traffic_light_model_url)
+        
+        # Загружаем классы знаков из YAML
+        with open(sign_classes_yaml, 'r') as f:
+            yaml_dict = yaml.safe_load(f)
+        self.sign_classes = yaml_dict['names']
+        
+        self.lane_detection_algo_path = lane_detection_algo_path  # Алгоритм для распознавания разметки (будет реализовано позже)
 
-    # Открываем видеофайл с помощью OpenCV
-    cap = cv2.VideoCapture(input_video)
+    def process_traffic_signs(self, frame, confidence=0.2):
+            """
+            Функция для обработки кадра и распознавания дорожных знаков.
+            
+            :param frame: Входной кадр для обработки.
+            :return: Список с типами знаков и их координатами.
+            """
+            results = self.sign_model(frame)
+            boxes = results[0].boxes.xywh.tolist()
+            cls = results[0].boxes.cls.tolist()
+            conf = results[0].boxes.conf
+            sign_bboxes = []
 
-    # Получение ширины и высоты кадров для сохранения видео
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            # Проходим по всем найденным объектам и определяем их тип
+            for (box, cls_, conf_) in zip(boxes, cls, conf):  # Перебор объектов
 
-    # Создание объекта VideoWriter для сохранения обработанного видео
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, 30.0, (frame_width, frame_height))
+                x, y, w, h = box
+                class_name = self.sign_classes[int(cls_)]
+                if conf_ > confidence:
+                
+                    sign_bboxes.append((class_name, (x, y, w, h)))
+            
+            return sign_bboxes
+    
+    def process_traffic_lights_and_stop_signs(self, frame, confidence=0.2):
+        """
+        Функция для обработки кадра и распознавания светофоров и стоп-знаков.
+        
+        :param frame: Входной кадр для обработки.
+        :return: Список с координатами для светофоров и стоп-знаков.
+        """
+        results = self.traffic_light_model(frame)
+        boxes = results[0].boxes.xywh.tolist()
+        cls = results[0].boxes.cls.tolist()
+        conf = results[0].boxes.conf
+        bboxes_traffic_lights = []
+        bboxes_stop_signs = []
 
-    frame_number = 0  # Инициализируем номер кадра
+        # Проходим по всем найденным объектам и определяем их тип
+        for (box, cls_, conf_) in zip(boxes, cls, conf):  # Перебор объектов
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+            x, y, w, h = box
+            class_name = results[0].names[int(cls_)]
+            if conf_ > confidence:
+                if class_name.lower() == 'traffic light':  # Если это светофор
+                    bboxes_traffic_lights.append((x, y, w, h))
+                elif class_name.lower() == 'stop sign':  # Если это стоп-знак
+                    bboxes_stop_signs.append((x, y, w, h))
+        
+        return bboxes_traffic_lights, bboxes_stop_signs
 
-        # Отправка кадра в модель для детекции
-        results = model(frame)
+    
+    def process_frame(self, frame):
+        """
+        Обработка одного кадра: распознавание светофоров, стоп-знаков и дорожных знаков.
+        
+        :param frame: Входной кадр для обработки.
+        :return: Словарь с результатами по каждому типу объектов.
+        """
+        # Получаем координаты светофоров и стоп-знаков
+        bboxes_traffic_lights, bboxes_stop_signs = self.process_traffic_lights_and_stop_signs(frame)
+        
+        # Получаем координаты дорожных знаков
+        sign_bboxes = self.process_traffic_signs(frame)
+        
+        return {
+            'traffic_lights': bboxes_traffic_lights,
+            'stop_signs': bboxes_stop_signs,
+            'traffic_signs': sign_bboxes
+        }
 
-        if input_video not in report:
-            report[input_video] = {}  # Если видео еще нет в отчете, создаем запись
 
-        # Добавляем новый кадр в отчет
-        report[input_video][frame_number] = []
 
-        # Обработка результатов
-        for det in results.xyxy[0]:
-            x1, y1, x2, y2, confidence, cls = det
-            label = model.names[int(cls)]  # Получаем метку класса
+    def process_video(self, video_path, frame_step=1, show=False):
+        cap = cv2.VideoCapture(video_path)
+        fps = int(cap.get(cv2.CAP_PROP_FPS))  # Получаем FPS видео
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))  # Общее количество кадров в видео
 
-            # Добавляем аннотацию в отчет
-            report[input_video][frame_number].append({
-                "coordinates": (x1.item(), y1.item(), x2.item(), y2.item()),  # Преобразуем в обычные числа
-                "confidence": confidence.item(),  # Преобразуем в обычное число
-                "class": label
-            })
+        # Проверка корректности параметров
+        if frame_step <= 0:
+            raise ValueError("Параметр frame_step должен быть больше нуля.")
+        if total_frames == 0:
+            raise ValueError("Видео не содержит кадров.")
 
-            # Рисуем рамку и метку
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            cv2.putText(frame, f'{label} {confidence:.2f}', (int(x1), int(y1) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # Определяем шаг для обработки кадров
+        if frame_step >= fps:
+            frame_step = total_frames  # Берем только один кадр из видео, если frame_step >= FPS
 
-        # Записываем обработанный кадр в выходное видео
-        out.write(frame)
+        print(f"Общее количество кадров: {total_frames}, FPS: {fps}")
+        print(f"Обрабатывается каждый {frame_step}-й кадр.")
 
-        # Отображение обработанного кадра
-        cv2.imshow('Processed Frame', frame)
+        frame_count = 0
+        processed_count = 0
 
-        frame_number += 1  # Инкрементируем номер кадра
+        # Прогресс-бар для отслеживания обработки
+        with tqdm(total=(total_frames // frame_step), desc="Processing Video") as pbar:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-        # Выход из цикла по нажатию клавиши "q"
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+                frame_count += 1
 
-    # Освобождение ресурсов
-    cap.release()
-    out.release()
-    cv2.destroyAllWindows()
+                # Обработка кадра только при условии, что номер кадра кратен frame_step
+                if frame_count % frame_step != 0:
+                    continue
+
+                # Обрабатываем кадр
+                results = self.process_frame(frame)
+                processed_count += 1
+
+                # Обновляем прогресс-бар
+                pbar.update(1)
+
+                if show:
+                    # Отображаем кадр с результатами
+                    for label, bboxes in results.items():
+                        for x, y, w, h in bboxes:
+                            cv2.rectangle(frame, (int(x - w / 2), int(y - h / 2)),
+                                        (int(x + w / 2), int(y + h / 2)), (0, 255, 0), 2)
+                            # Отображаем метку класса рядом с bbox
+                            cv2.putText(frame, label, (int(x - w / 2), int(y - h / 2) - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                    cv2.imshow("Processed Frame", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+        print(f"Обработано {processed_count} кадров.")
+
+
