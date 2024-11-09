@@ -3,10 +3,10 @@ import yaml
 from ultralytics import YOLO
 import numpy as np
 from tqdm import tqdm
-
+import matplotlib.pyplot as plt
 
 class VideoProcessor:
-    def __init__(self, sign_model_path, traffic_light_model_url, sign_classes_yaml, lane_detection_algo_path):
+    def __init__(self, sign_model_path, traffic_light_model_url, sign_classes_yaml):
         """
         Инициализация класса для обработки видео с использованием моделей для распознавания знаков и светофоров.
         
@@ -23,7 +23,31 @@ class VideoProcessor:
             yaml_dict = yaml.safe_load(f)
         self.sign_classes = yaml_dict['names']
         
-        self.lane_detection_algo_path = lane_detection_algo_path  # Алгоритм для распознавания разметки (будет реализовано позже)
+    def violation_1(self):
+        pass
+
+    def draw_annotations(self, frame, results:dict):
+        """
+        Рисует аннотации на изображении на основе результатов распознавания объектов.
+
+        :param frame: Кадр изображения, на котором будут отображаться аннотации.
+        :param results: Словарь с результатами распознавания, где ключи — метки объектов, 
+                        а значения — списки координат их bounding boxes.
+                        Формат словаря: {'label1': [(x1, y1, w1, h1), ...], 'label2': [(x2, y2, w2, h2), ...], ...}
+        
+        Описание:
+        - Функция проходит по всем меткам и их bounding boxes в словаре результатов и рисует их на изображении.
+        - Рисует прямоугольники вокруг обнаруженных объектов и отображает метки классов рядом с ними.
+        """
+        for label, bboxes in results.items():
+            for x, y, w, h in bboxes:
+                cv2.rectangle(frame, (int(x - w / 2), int(y - h / 2)),
+                            (int(x + w / 2), int(y + h / 2)), (0, 255, 0), 2)
+                # Отображаем метку класса рядом с bbox
+                cv2.putText(frame, label, (int(x - w / 2), int(y - h / 2) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                plt.imshow(frame)
+                plt.show()
 
     def process_traffic_signs(self, frame, confidence=0.2):
             """
@@ -49,7 +73,64 @@ class VideoProcessor:
             
             return sign_bboxes
     
-    def process_traffic_lights_and_stop_signs(self, frame, confidence=0.2):
+    def crop_and_identify_color(self, frame, bbox):
+        """
+        Обрезает изображение по координатам bounding box и определяет цвет светофора.
+
+        :param frame: Исходное изображение (кадр) для обработки.
+        :param bbox: Координаты bounding box в формате (x, y, w, h), где x и y - координаты центра, 
+                    w и h - ширина и высота.
+        :return: Целочисленное значение, обозначающее преобладающий цвет:
+                1 - красный или желтый (сигналы, означающие остановку),
+                0 - зеленый (сигнал продолжения движения),
+                None - цвет не определен.
+        """
+        # bbox — координаты в формате (x, y, w, h)
+        x, y, w, h = bbox
+
+        # Определение верхнего левого и нижнего правого углов
+        x1 = int(x - w / 2)
+        y1 = int(y - h / 2)
+        x2 = int(x + w / 2)
+        y2 = int(y + h / 2)
+
+        # Обрезка изображения по заданным координатам
+        cropped_image = frame[y1:y2, x1:x2]
+
+        # Преобразование в цветовое пространство HSV
+        hsv_cropped = cv2.cvtColor(cropped_image, cv2.COLOR_RGB2HSV)
+
+        # Определение диапазонов цвета для красного, желтого и зеленого
+        red_lower1 = np.array([0, 70, 50])
+        red_upper1 = np.array([10, 255, 255])
+        red_lower2 = np.array([170, 70, 50])
+        red_upper2 = np.array([180, 255, 255])
+        green_lower = np.array([35, 70, 50])
+        green_upper = np.array([85, 255, 255])
+        yellow_lower = np.array([20, 70, 50])
+        yellow_upper = np.array([30, 255, 255])
+
+        # Маски для определения цветов
+        mask_red = cv2.inRange(hsv_cropped, red_lower1, red_upper1) + cv2.inRange(hsv_cropped, red_lower2, red_upper2)
+        mask_green = cv2.inRange(hsv_cropped, green_lower, green_upper)
+        mask_yellow = cv2.inRange(hsv_cropped, yellow_lower, yellow_upper)
+
+        # Подсчет количества пикселей каждого цвета
+        red_count = np.sum(mask_red > 0)
+        green_count = np.sum(mask_green > 0)
+        yellow_count = np.sum(mask_yellow > 0)
+
+        # Определение преобладающего цвета
+        if red_count > green_count and red_count > yellow_count:
+            return 1
+        elif green_count > red_count and green_count > yellow_count:
+            return 0
+        elif yellow_count > red_count and yellow_count > green_count:
+            return 1
+        else:
+            return 0
+        
+    def process_traffic_lights_and_stop_signs(self, frame, confidence=0.25):
         """
         Функция для обработки кадра и распознавания светофоров и стоп-знаков.
         
@@ -62,6 +143,7 @@ class VideoProcessor:
         conf = results[0].boxes.conf
         bboxes_traffic_lights = []
         bboxes_stop_signs = []
+        traffic_lights_colors = []
 
         # Проходим по всем найденным объектам и определяем их тип
         for (box, cls_, conf_) in zip(boxes, cls, conf):  # Перебор объектов
@@ -71,10 +153,11 @@ class VideoProcessor:
             if conf_ > confidence:
                 if class_name.lower() == 'traffic light':  # Если это светофор
                     bboxes_traffic_lights.append((x, y, w, h))
+                    traffic_lights_colors.append(self.crop_and_identify_color(frame, box))
                 elif class_name.lower() == 'stop sign':  # Если это стоп-знак
                     bboxes_stop_signs.append((x, y, w, h))
         
-        return bboxes_traffic_lights, bboxes_stop_signs
+        return bboxes_traffic_lights, traffic_lights_colors, bboxes_stop_signs
 
     
     def process_frame(self, frame):
@@ -96,7 +179,26 @@ class VideoProcessor:
             'traffic_signs': sign_bboxes
         }
 
+    def draw_annotations(self, frame, results:dict):
+        """
+        Рисует аннотации на изображении на основе результатов распознавания объектов.
 
+        :param frame: Кадр изображения, на котором будут отображаться аннотации.
+        :param results: Словарь с результатами распознавания, где ключи — метки объектов, 
+                        а значения — списки координат их bounding boxes.
+                        Формат словаря: {'label1': [(x1, y1, w1, h1), ...], 'label2': [(x2, y2, w2, h2), ...], ...}
+        
+        Описание:
+        - Функция проходит по всем меткам и их bounding boxes в словаре результатов и рисует их на изображении.
+        - Рисует прямоугольники вокруг обнаруженных объектов и отображает метки классов рядом с ними.
+        """
+        for label, bboxes in results.items():
+            for x, y, w, h in bboxes:
+                cv2.rectangle(frame, (int(x - w / 2), int(y - h / 2)),
+                            (int(x + w / 2), int(y + h / 2)), (0, 255, 0), 2)
+                # Отображаем метку класса рядом с bbox
+                cv2.putText(frame, label, (int(x - w / 2), int(y - h / 2) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
     def process_video(self, video_path, frame_step=1, show=False):
         cap = cv2.VideoCapture(video_path)
@@ -123,6 +225,7 @@ class VideoProcessor:
         with tqdm(total=(total_frames // frame_step), desc="Processing Video") as pbar:
             while cap.isOpened():
                 ret, frame = cap.read()
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 if not ret:
                     break
 
